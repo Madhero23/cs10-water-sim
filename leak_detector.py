@@ -1,117 +1,228 @@
 """
-leak_detector.py – Anomaly & Leak Detection
-Analyzes per-minute flow data to detect leaks and unusual patterns.
+leak_detector.py – Statistical Baseline Leak Detection
+Implements 3 trigger conditions per CSE 10/L project guide.
 """
 
-from dataclasses import dataclass
-from typing import List
+from dataclasses import dataclass, field
+from typing import List, Optional
+import numpy as np
 
 
 @dataclass
 class LeakAlert:
     """A single leak / anomaly alert."""
-    alert_type: str       # "continuous_flow", "spike", "overnight"
-    severity: str         # "low", "medium", "high"
-    minute: int           # minute when detected
-    time_str: str         # human-readable time
+    alert_type: str       # "leak", "anomaly", "warning"
+    severity: str         # "high", "medium", "low"
+    minute: int
+    time_str: str
     description: str
-    flow_gpm: float = 0.0
+    flow_lpm: float = 0.0
+    fixture: str = ""
+    duration_min: float = 0.0
+    estimated_waste_liters: float = 0.0
 
 
-def _minute_to_str(m: int) -> str:
-    return f"{m // 60:02d}:{m % 60:02d}"
+@dataclass
+class BaselineProfile:
+    """Statistical baseline from historical runs."""
+    historical_avg_daily: float = 0.0
+    hourly_baseline: dict = field(default_factory=lambda: {h: 0.0 for h in range(24)})
+    per_fixture_baseline: dict = field(default_factory=dict)
+    std_daily: float = 0.0
+    n_runs: int = 0
 
 
-def check_for_leaks(
-    flow_series: list[float],
-    quiet_start: int = 23 * 60,    # 11:00 PM
-    quiet_end: int = 5 * 60,       # 5:00 AM
-    continuous_threshold: int = 30, # minutes of continuous flow
-    spike_multiplier: float = 2.0,
-    rolling_window: int = 60,
+def compute_baseline(replication_states) -> BaselineProfile:
+    """Compute baseline profile from a list of SimState objects."""
+    from fixtures import FIXTURE_KEYS
+
+    baseline = BaselineProfile()
+    n = len(replication_states)
+    if n == 0:
+        return baseline
+
+    baseline.n_runs = n
+    daily_totals = []
+
+    hourly_sums = {h: 0.0 for h in range(24)}
+    fixture_sums = {k: 0.0 for k in FIXTURE_KEYS}
+
+    for state in replication_states:
+        daily_totals.append(state.cumulative_liters)
+
+        for h in range(24):
+            if h in state.hourly_liters:
+                hourly_sums[h] += state.hourly_liters[h]
+
+        for k in FIXTURE_KEYS:
+            fixture_sums[k] += state.fixture_liters.get(k, 0)
+
+    baseline.historical_avg_daily = round(np.mean(daily_totals), 2)
+    baseline.std_daily = round(np.std(daily_totals), 2)
+    baseline.hourly_baseline = {h: round(v / n, 2) for h, v in hourly_sums.items()}
+    baseline.per_fixture_baseline = {k: round(v / n, 2) for k, v in fixture_sums.items()}
+
+    return baseline
+
+
+def detect_leaks(
+    state,
+    baseline: Optional[BaselineProfile] = None,
 ) -> List[LeakAlert]:
     """
-    Analyze a 1,440-element flow series and return alerts.
-
-    Detection rules:
-    1. Continuous overnight flow — any flow > 0 for continuous_threshold+
-       minutes during quiet hours.
-    2. Sudden spike — current flow > spike_multiplier × rolling average.
+    Analyze simulation state for leaks using 3 conditions:
+    1. Overnight continuous flow (23:00-05:00)
+    2. Daily usage > baseline × 1.5
+    3. Single fixture active > 30 min without user event
     """
-    alerts: List[LeakAlert] = []
-    n = len(flow_series)
+    alerts = []
+    minute_log = state.minute_log
+    events = state.events
 
-    # ── Rule 1: Continuous overnight flow ────────────────────────────
-    consecutive = 0
-    alert_raised_overnight = False
-    for m in range(n):
-        is_quiet = m >= quiet_start or m < quiet_end
-        if is_quiet and flow_series[m] > 0.01:
-            consecutive += 1
-            if consecutive >= continuous_threshold and not alert_raised_overnight:
-                alerts.append(LeakAlert(
-                    alert_type="overnight",
-                    severity="high",
-                    minute=m,
-                    time_str=_minute_to_str(m),
-                    description=(
-                        f"Continuous water flow detected for {consecutive} minutes "
-                        f"during quiet hours (11 PM – 5 AM). "
-                        f"Possible leak or running fixture."
-                    ),
-                    flow_gpm=flow_series[m],
-                ))
-                alert_raised_overnight = True
+    # Build event time lookup
+    event_minutes = set()
+    for ev in events:
+        for t in range(int(ev["minute"]), int(ev["minute"] + ev["duration"])):
+            event_minutes.add(t)
+
+    # ── CONDITION 1: Overnight continuous flow ──────────────────────────────
+    overnight_consecutive = 0
+    overnight_start = None
+
+    for entry in minute_log:
+        m = entry["minute"]
+        day_hour = m % 1440 // 60
+
+        # Overnight = 23:00-05:00
+        is_overnight = day_hour >= 23 or day_hour < 5
+
+        if is_overnight and entry["flow_lpm"] > 0.5:
+            if m not in event_minutes:
+                if overnight_start is None:
+                    overnight_start = m
+                overnight_consecutive += 1
+
+                if overnight_consecutive >= 30:
+                    h = m // 60 % 24
+                    time_str = f"{h:02d}:{m % 60:02d}"
+                    waste = entry["flow_lpm"] * overnight_consecutive
+                    alerts.append(LeakAlert(
+                        alert_type="leak",
+                        severity="high",
+                        minute=m,
+                        time_str=time_str,
+                        description=(
+                            f"⚠️ LEAK DETECTED — Continuous flow of "
+                            f"{entry['flow_lpm']:.1f} LPM during idle hours. "
+                            f"Duration: {overnight_consecutive} min. "
+                            f"Est. waste: {waste:.1f} L"
+                        ),
+                        flow_lpm=entry["flow_lpm"],
+                        duration_min=overnight_consecutive,
+                        estimated_waste_liters=waste,
+                    ))
+                    overnight_consecutive = 0
+                    overnight_start = None
         else:
-            consecutive = 0
+            overnight_consecutive = 0
+            overnight_start = None
 
-    # ── Rule 2: Sudden spikes ─────────────────────────────────────────
-    for m in range(rolling_window, n):
-        window = flow_series[max(0, m - rolling_window):m]
-        avg = sum(window) / len(window) if window else 0
-        if avg > 0.1 and flow_series[m] > spike_multiplier * avg:
-            # Avoid duplicate alerts within 10 minutes
-            if not any(
-                a.alert_type == "spike" and abs(a.minute - m) < 10
-                for a in alerts
-            ):
+    # ── CONDITION 2: Overuse anomaly ────────────────────────────────────────
+    if baseline and baseline.historical_avg_daily > 0:
+        threshold = baseline.historical_avg_daily * 1.5
+        if state.cumulative_liters > threshold:
+            deviation = (
+                (state.cumulative_liters - baseline.historical_avg_daily)
+                / baseline.historical_avg_daily * 100
+            )
+            alerts.append(LeakAlert(
+                alert_type="anomaly",
+                severity="medium",
+                minute=state.total_minutes - 1,
+                time_str="End of Day",
+                description=(
+                    f"Daily usage ({state.cumulative_liters:.1f} L) exceeds "
+                    f"150% of baseline ({baseline.historical_avg_daily:.1f} L). "
+                    f"Deviation: +{deviation:.1f}%"
+                ),
+                flow_lpm=0,
+            ))
+
+    # ── CONDITION 3: Sustained unexpected fixture flow ──────────────────────
+    # Track continuous per-fixture active minutes without user events
+    fixture_run = {}
+    for entry in minute_log:
+        m = entry["minute"]
+        if m in event_minutes:
+            # Normal user event, reset
+            fixture_run.clear()
+            continue
+
+        if entry["flow_lpm"] > 0.5:
+            fk = "unknown"
+            # Try to identify which fixture
+            for ev in events:
+                if ev["minute"] <= m < ev["minute"] + ev["duration"]:
+                    fk = ev["fixture"]
+                    break
+
+            if fk not in fixture_run:
+                fixture_run[fk] = {"start": m, "count": 0, "flow": entry["flow_lpm"]}
+            fixture_run[fk]["count"] += 1
+            fixture_run[fk]["flow"] = max(fixture_run[fk]["flow"], entry["flow_lpm"])
+
+            if fixture_run[fk]["count"] >= 30:
+                h = m // 60 % 24
+                time_str = f"{h:02d}:{m % 60:02d}"
+                waste = fixture_run[fk]["flow"] * fixture_run[fk]["count"]
                 alerts.append(LeakAlert(
-                    alert_type="spike",
+                    alert_type="warning",
                     severity="medium",
                     minute=m,
-                    time_str=_minute_to_str(m),
+                    time_str=time_str,
                     description=(
-                        f"Flow spike detected at {_minute_to_str(m)}: "
-                        f"{flow_series[m]:.1f} GPM vs rolling avg {avg:.1f} GPM "
-                        f"({flow_series[m]/avg:.1f}× above average)."
+                        f"Fixture '{fk}' active for {fixture_run[fk]['count']} min "
+                        f"without user event — possible leak. "
+                        f"Flow: {fixture_run[fk]['flow']:.1f} LPM"
                     ),
-                    flow_gpm=flow_series[m],
+                    flow_lpm=fixture_run[fk]["flow"],
+                    fixture=fk,
+                    duration_min=fixture_run[fk]["count"],
+                    estimated_waste_liters=waste,
                 ))
+                fixture_run.pop(fk)
 
-    # ── Rule 3: Continuous flow during any unoccupied period ─────────
-    # Check for long stretches of low but non-zero flow (drip leak)
-    drip_consecutive = 0
-    drip_alerted = False
-    for m in range(n):
-        if 0 < flow_series[m] <= 0.2:
-            drip_consecutive += 1
-            if drip_consecutive >= 120 and not drip_alerted:  # 2+ hours of drip
-                alerts.append(LeakAlert(
-                    alert_type="continuous_flow",
-                    severity="medium",
-                    minute=m,
-                    time_str=_minute_to_str(m),
-                    description=(
-                        f"Low continuous flow (~{flow_series[m]:.2f} GPM) detected "
-                        f"for {drip_consecutive} consecutive minutes. "
-                        f"Possible drip leak."
-                    ),
-                    flow_gpm=flow_series[m],
-                ))
-                drip_alerted = True
-        else:
-            drip_consecutive = 0
-
-    # Sort by minute
-    alerts.sort(key=lambda a: a.minute)
     return alerts
+
+
+def inject_leak(
+    seed: int = 99,
+    onset_range_1: tuple = (0, 300),     # 00:00-05:00
+    onset_range_2: tuple = (600, 840),   # 10:00-14:00
+    rate_range: tuple = (0.5, 2.0),
+) -> dict:
+    """Generate random leak parameters for testing."""
+    rng = np.random.default_rng(seed)
+
+    onset = int(rng.choice([
+        rng.integers(onset_range_1[0], onset_range_1[1]),
+        rng.integers(onset_range_2[0], onset_range_2[1]),
+    ]))
+    rate = round(rng.uniform(rate_range[0], rate_range[1]), 2)
+    fixture = rng.choice(["toilet", "faucet", "pipe"])
+
+    return {
+        "onset_minute": onset,
+        "rate_lpm": rate,
+        "source_fixture": str(fixture),
+        "onset_time": f"{onset // 60:02d}:{onset % 60:02d}",
+    }
+
+
+def get_leak_status(alerts: List[LeakAlert]) -> dict:
+    """Get overall leak status indicator."""
+    if any(a.severity == "high" for a in alerts):
+        return {"status": "leak", "label": "🔴 LEAK ALERT", "color": "#EF4444"}
+    elif any(a.severity == "medium" for a in alerts):
+        return {"status": "anomaly", "label": "🟡 ANOMALY", "color": "#F59E0B"}
+    return {"status": "ok", "label": "🟢 NO LEAKS DETECTED", "color": "#22C55E"}

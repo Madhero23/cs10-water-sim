@@ -1,86 +1,142 @@
 """
-pricing.py – Davao City Water District Tiered Pricing
-Converts gallon usage to cubic meters and applies the DCWD rate schedule.
+pricing.py – Davao City Water District Pricing (₱ per Liter)
+Three pricing schemes as per CSE 10/L Project Guide.
 """
 
-GALLONS_PER_CUBIC_METER = 264.172
 
-# Davao City Water District residential tiers
-# Each tuple: (upper_bound_m3, rate_per_m3_php)
-# The first tier is a flat minimum charge.
+# ── Pricing Schemes ─────────────────────────────────────────────────────────
+
+PRICING_SCHEMES = {
+    "flat": {
+        "label": "Flat Rate (₱0.004/L)",
+        "description": "Uniform rate applied to all consumption.",
+    },
+    "tiered": {
+        "label": "Tiered Pricing",
+        "description": "Rate increases as usage volume rises.",
+    },
+    "peak_hour": {
+        "label": "Peak Hour Surcharge",
+        "description": "Higher rate during peak hours (6-9 AM, 6-9 PM).",
+    },
+}
+
+# Flat rate
+FLAT_RATE = 0.004  # ₱ per liter
+
+# Tiered rates
 TIERS = [
-    (10,  None),    # 0-10 m³  → flat ₱120.55
-    (20,  18.85),   # 11-20 m³
-    (30,  27.80),   # 21-30 m³
-    (40,  37.90),   # 31-40 m³
-    (None, 47.35),  # 41+  m³
+    (500,  0.003),   # 0-500 L    → ₱0.003/L
+    (1000, 0.005),   # 500-1000 L → ₱0.005/L
+    (None, 0.007),   # >1000 L    → ₱0.007/L
 ]
 
-MINIMUM_CHARGE_PHP = 120.55
+# Peak hour rate
+PEAK_RATE = 0.0045      # ₱/L during peak hours
+OFF_PEAK_RATE = 0.003   # ₱/L during off-peak
+PEAK_HOURS = set(range(6, 9 + 1)) | set(range(18, 21 + 1))  # 6-9 AM, 6-9 PM
 
 
-def gallons_to_m3(gallons: float) -> float:
-    """Convert gallons to cubic meters."""
-    return gallons / GALLONS_PER_CUBIC_METER
+def compute_flat_cost(total_liters: float) -> float:
+    """Flat rate: ₱0.004 per liter."""
+    return total_liters * FLAT_RATE
 
 
-def compute_monthly_bill(total_gallons: float) -> dict:
+def compute_tiered_cost(total_liters: float) -> dict:
     """
-    Compute the monthly water bill under DCWD tiered pricing.
-
-    Returns a dict with:
-        - total_gallons: input
-        - total_m3: converted volume
-        - tier_breakdown: list of {tier_label, m3, rate, cost}
-        - total_cost_php: final bill in Philippine Pesos
+    Tiered pricing: rate increases with volume.
+    Returns dict with tier_breakdown and total_cost_php.
     """
-    total_m3 = gallons_to_m3(total_gallons)
+    remaining = total_liters
     breakdown = []
-    remaining = total_m3
     total_cost = 0.0
     prev_bound = 0
 
-    for i, (upper, rate) in enumerate(TIERS):
+    for upper, rate in TIERS:
         if remaining <= 0:
             break
-
         if upper is None:
-            tier_m3 = remaining
+            tier_liters = remaining
+            label = f"{prev_bound}+ L"
         else:
-            tier_m3 = min(remaining, upper - prev_bound)
+            tier_liters = min(remaining, upper - prev_bound)
+            label = f"{prev_bound}–{upper} L"
 
-        if i == 0:
-            # First tier: flat minimum regardless of usage
-            cost = MINIMUM_CHARGE_PHP
-            label = f"0–{upper} m³ (minimum)"
-        else:
-            cost = tier_m3 * rate
-            lower = prev_bound + 1
-            label = f"{lower}–{upper} m³" if upper else f"{prev_bound + 1}+ m³"
-
+        cost = tier_liters * rate
         breakdown.append({
             "tier_label": label,
-            "m3": round(tier_m3, 3),
-            "rate": rate if rate else "flat",
-            "cost": round(cost, 2),
+            "liters": round(tier_liters, 2),
+            "rate": rate,
+            "cost": round(cost, 4),
         })
         total_cost += cost
-        remaining -= tier_m3
+        remaining -= tier_liters
         prev_bound = upper if upper else prev_bound
 
     return {
-        "total_gallons": round(total_gallons, 2),
-        "total_m3": round(total_m3, 3),
+        "total_liters": round(total_liters, 2),
         "tier_breakdown": breakdown,
-        "total_cost_php": round(total_cost, 2),
+        "total_cost_php": round(total_cost, 4),
     }
 
 
-def compute_cost_for_gallons(cumulative_gallons: float) -> float:
+def compute_peak_hour_cost(hourly_liters: dict) -> dict:
+    """
+    Peak hour pricing based on hour-by-hour consumption.
+    hourly_liters: dict of {hour (0-23): liters}
+    Returns breakdown by peak/off-peak.
+    """
+    peak_liters = 0.0
+    offpeak_liters = 0.0
+
+    for hour, liters in hourly_liters.items():
+        h = int(hour)
+        if h in PEAK_HOURS:
+            peak_liters += liters
+        else:
+            offpeak_liters += liters
+
+    peak_cost = peak_liters * PEAK_RATE
+    offpeak_cost = offpeak_liters * OFF_PEAK_RATE
+    total = peak_cost + offpeak_cost
+
+    return {
+        "peak_liters": round(peak_liters, 2),
+        "peak_cost": round(peak_cost, 4),
+        "offpeak_liters": round(offpeak_liters, 2),
+        "offpeak_cost": round(offpeak_cost, 4),
+        "total_cost_php": round(total, 4),
+    }
+
+
+def compute_cost(total_liters: float, scheme: str = "flat",
+                 hourly_liters: dict | None = None) -> float:
     """Quick helper — returns just the total ₱ cost."""
-    return compute_monthly_bill(cumulative_gallons)["total_cost_php"]
+    if scheme == "flat":
+        return round(compute_flat_cost(total_liters), 4)
+    elif scheme == "tiered":
+        return compute_tiered_cost(total_liters)["total_cost_php"]
+    elif scheme == "peak_hour" and hourly_liters:
+        return compute_peak_hour_cost(hourly_liters)["total_cost_php"]
+    return round(compute_flat_cost(total_liters), 4)
 
 
-def daily_cost(daily_gallons: float, days: int = 30) -> float:
-    """Project a daily usage to a monthly bill."""
-    return compute_cost_for_gallons(daily_gallons * days)
+def compute_bill_summary(total_liters: float, scheme: str = "flat",
+                         hourly_liters: dict | None = None) -> dict:
+    """Generate a full bill summary for display."""
+    if scheme == "tiered":
+        result = compute_tiered_cost(total_liters)
+        result["scheme"] = "Tiered Pricing"
+        return result
+    elif scheme == "peak_hour" and hourly_liters:
+        result = compute_peak_hour_cost(hourly_liters)
+        result["scheme"] = "Peak Hour Surcharge"
+        result["total_liters"] = round(total_liters, 2)
+        return result
+    else:
+        return {
+            "scheme": "Flat Rate",
+            "total_liters": round(total_liters, 2),
+            "rate": FLAT_RATE,
+            "total_cost_php": round(compute_flat_cost(total_liters), 4),
+        }
