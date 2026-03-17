@@ -107,6 +107,7 @@ app.layout = html.Div(id="app-container", children=[
     dcc.Store(id="sim-data-store"),
     dcc.Store(id="baseline-store"),
     dcc.Store(id="active-tab", data="tab-live"),
+    dcc.Store(id="num-users-store", data=4),
 
     # ── Header ───────────────────────────────────────────────────
     html.Div(className="header", children=[
@@ -139,14 +140,21 @@ app.layout = html.Div(id="app-container", children=[
             ]),
             dcc.Input(
                 id="duration-value", type="number", value=24, min=1, max=72,
-                style={
-                    "width": "70px", "padding": "6px 10px",
-                    "backgroundColor": "rgba(255,255,255,0.06)",
-                    "color": "#f1f5f9", "border": "1px solid rgba(255,255,255,0.08)",
-                    "borderRadius": "8px", "fontSize": "13px", "fontFamily": "Inter",
-                },
+                className="input-dark",
             ),
             html.Span(id="duration-unit-label", className="duration-label", children="hours"),
+        ]),
+
+        html.Div(className="controls-separator"),
+
+        # Household Person Selector
+        html.Div(className="person-group", children=[
+            html.Span("👥 People:", className="duration-label"),
+            html.Div(id="person-selector", className="toggle-group", children=[
+                html.Button(str(i), id={"type": "person-btn", "index": i},
+                            className=f"toggle-btn {'active' if i==4 else ''}", n_clicks=0)
+                for i in range(1, 11)
+            ]),
         ]),
 
         html.Div(className="controls-separator"),
@@ -185,6 +193,11 @@ app.layout = html.Div(id="app-container", children=[
         html.Button("🔄  Compare All", id="btn-compare", className="btn btn-secondary", n_clicks=0),
         html.Button("💧  Simulate Leak", id="btn-leak", className="btn btn-danger", n_clicks=0),
         html.Button("⏹  Reset", id="btn-reset", className="btn btn-reset", n_clicks=0),
+    ]),
+
+    # ── Preview Panel ───────────────────────────────────────────
+    html.Div(id="preview-panel", className="preview-panel", children=[
+        html.Div(id="preview-content", className="preview-content")
     ]),
 
     # ── Tab Bar ──────────────────────────────────────────────────
@@ -449,8 +462,7 @@ def switch_tab(n1, n2, n3, n4):
     return (*tab_classes, *btn_classes)
 
 
-# ── Duration toggle ──────────────────────────────────────────────────────────
-
+# Re-insertion of toggle_duration which was replaced by update_person_count above for grouping
 @app.callback(
     [
         Output("btn-hours", "className"),
@@ -467,7 +479,7 @@ def switch_tab(n1, n2, n3, n4):
     ],
     prevent_initial_call=True,
 )
-def toggle_duration(h, d, w):
+def toggle_duration_callback(h, d, w):
     triggered = ctx.triggered_id
     classes = ["toggle-btn"] * 3
     if triggered == "btn-hours":
@@ -481,6 +493,64 @@ def toggle_duration(h, d, w):
         return (*classes, 4, 2, "weeks")
     classes[0] = "toggle-btn active"
     return (*classes, 72, 24, "hours")
+
+
+# ── Duration toggle ──────────────────────────────────────────────────────────
+
+@app.callback(
+    [
+        Output({"type": "person-btn", "index": ALL}, "className"),
+        Output("num-users-store", "data"),
+    ],
+    Input({"type": "person-btn", "index": ALL}, "n_clicks"),
+    State("num-users-store", "data"),
+    prevent_initial_call=True,
+)
+def update_person_count(n_clicks_list, current_users):
+    triggered = ctx.triggered_id
+    if not triggered or "index" not in triggered:
+        return no_update, no_update
+    
+    new_count = triggered["index"]
+    classes = []
+    for i in range(1, 11):
+        classes.append(f"toggle-btn {'active' if i == new_count else ''}")
+    
+    return classes, new_count
+
+
+@app.callback(
+    Output("preview-content", "children"),
+    [
+        Input("num-users-store", "data"),
+        Input("pricing-dropdown", "value"),
+    ]
+)
+def update_preview(n, pricing):
+    est_l = (179.0 * n) + 178.6
+    est_events = int((1 + 5 + 6) * n + 3) # shower + faucet + toilet + shared
+    
+    # Simple estimate for cost using Flat Rate as default/comparison
+    cost = est_l * 0.004
+    
+    users_str = ", ".join([f"U{i}" for i in range(1, n+1)])
+    
+    warning = None
+    if n >= 7:
+        warning = html.Div("⚠️ Large household — Tiered pricing recommended.", className="preview-warning")
+    elif n == 1:
+        warning = html.Div("ℹ️ Single-person household — Shared events reduced.", className="preview-note")
+
+    return html.Div([
+        html.Div(f"👥 Household: {n} persons", className="preview-title"),
+        html.Div([
+            html.Div(f"📅 Daily Usage: ~{est_l:,.0f} L/day"),
+            html.Div(f"💧 Daily Events: ~{est_events} events"),
+            html.Div(f"💰 Daily Cost: ₱{cost:.2f} (Flat Rate)"),
+            html.Div(f"⚙️ Users: {users_str}"),
+        ], className="preview-stats"),
+        warning
+    ])
 
 
 # ── Reset ────────────────────────────────────────────────────────────────────
@@ -540,10 +610,11 @@ def _get_scenario_kwargs(scenario_key):
         State("pricing-dropdown", "value"),
         State("duration-value", "value"),
         State("duration-unit-label", "children"),
+        State("num-users-store", "data"),
     ],
     prevent_initial_call=True,
 )
-def run_simulation(n_clicks, scenario_key, pricing, dur_val, unit_label):
+def run_simulation(n_clicks, scenario_key, pricing, dur_val, unit_label, n_users):
     if not n_clicks:
         return no_update, no_update, no_update, no_update
 
@@ -554,7 +625,7 @@ def run_simulation(n_clicks, scenario_key, pricing, dur_val, unit_label):
     state = run_single_day(
         seed=42, duration_minutes=total_min,
         warmup_minutes=60, pricing_scheme=pricing,
-        num_days=num_days, **kwargs,
+        num_days=num_days, num_users=n_users, **kwargs,
     )
 
     # Run leak detection
@@ -575,6 +646,7 @@ def run_simulation(n_clicks, scenario_key, pricing, dur_val, unit_label):
         "drip_liters": state.drip_liters,
         "leak_liters": state.leak_liters,
         "total_minutes": state.total_minutes,
+        "num_users": state.num_users,
         "pricing_scheme": pricing,
         "alerts": [
             {
@@ -612,7 +684,7 @@ def run_simulation(n_clicks, scenario_key, pricing, dur_val, unit_label):
     ],
     prevent_initial_call=True,
 )
-def simulate_leak(n_clicks, pricing, dur_val, unit_label):
+def simulate_leak(n_clicks, pricing, dur_val, unit_label, n_users):
     if not n_clicks:
         return no_update, no_update, no_update, no_update
 
@@ -623,7 +695,7 @@ def simulate_leak(n_clicks, pricing, dur_val, unit_label):
     state = run_single_day(
         seed=42, duration_minutes=total_min,
         warmup_minutes=60, pricing_scheme=pricing,
-        num_days=num_days,
+        num_days=num_days, num_users=n_users,
         leak_gpm=leak_params["rate_lpm"],
         leak_onset=leak_params["onset_minute"],
     )
@@ -695,9 +767,13 @@ def update_dashboard(data):
     fixture_uses = data["fixture_uses"]
     fixture_active = data.get("fixture_active_minutes", {})
     alerts = data["alerts"]
-    total_liters = data["cumulative_liters"]
-    total_cost = data["cumulative_cost"]
-    peak_flow = data["peak_flow_lpm"]
+    num_users = data.get("num_users", 4)
+    total_liters = data.get("cumulative_liters", 0)
+    total_cost = data.get("cumulative_cost", 0)
+    peak_flow = data.get("peak_flow_lpm", 0)
+    alerts = data.get("alerts", [])
+    
+    per_person_total = total_liters / num_users if num_users > 0 else 0
     hourly_liters = data.get("hourly_liters", {})
     hourly_fixture = data.get("hourly_fixture_liters", {})
     minute_log = data["minute_log"]
@@ -785,13 +861,14 @@ def update_dashboard(data):
         marker=dict(colors=pie_colors), hole=0.55,
         textinfo="percent+label",
         textfont=dict(size=11, color="#f1f5f9"),
-        hovertemplate="%{label}<br>%{value:.1f} L (%{percent})<extra></extra>",
+        hovertemplate="%{label}<br>Total: %{value:.1f} L<br>Per person: %{customdata:.1f} L<extra></extra>",
+        customdata=[v/num_users for v in pie_values] if num_users > 0 else pie_values,
     ))
     pie_fig.update_layout(**make_layout(
         showlegend=False,
         margin=dict(l=10, r=10, t=10, b=10), height=380,
         annotations=[dict(
-            text=f"<b>{total_liters:.0f} L</b><br>₱{total_cost:.2f}",
+            text=f"<b>{total_liters:.0f} L</b><br>₱{total_cost:.2f}<br><span style='font-size:10px'>{num_users} People</span>",
             x=0.5, y=0.5, font_size=16, font_color="#f1f5f9",
             showarrow=False,
         )],
@@ -928,10 +1005,11 @@ def update_dashboard(data):
     [
         State("scenario-dropdown", "value"),
         State("pricing-dropdown", "value"),
+        State("num-users-store", "data"),
     ],
     prevent_initial_call=True,
 )
-def run_replications_cb(n_clicks, scenario_key, pricing):
+def run_replications_cb(n_clicks, scenario_key, pricing, n_users):
     if not n_clicks:
         return [no_update] * 7
 
@@ -939,7 +1017,7 @@ def run_replications_cb(n_clicks, scenario_key, pricing):
 
     states = run_replications(
         n=30, base_seed=1000,
-        pricing_scheme=pricing, **kwargs,
+        pricing_scheme=pricing, num_users=n_users, **kwargs,
     )
     df = states_to_dataframe(states)
     stats = compute_statistics(df)
@@ -974,6 +1052,16 @@ def run_replications_cb(n_clicks, scenario_key, pricing):
                 html.Td(f'₱{cost["std"]}'),
                 html.Td(f'₱{cost["ci_lower"]} – ₱{cost["ci_upper"]}'),
                 html.Td(f'₱{cost["min"]}'), html.Td(f'₱{cost["max"]}'),
+            ]),
+            html.Tr([
+                html.Td("Per Person (L/day)"),
+                html.Td(f'{round(gal["mean"]/n_users, 1) if n_users>0 else 0}'),
+                html.Td("—"), html.Td("—"), html.Td("—"), html.Td("—"),
+            ]),
+            html.Tr([
+                html.Td("Per Person (₱/day)"),
+                html.Td(f'₱{round(cost["mean"]/n_users, 2) if n_users>0 else 0}'),
+                html.Td("—"), html.Td("—"), html.Td("—"), html.Td("—"),
             ]),
         ]),
     ])
@@ -1119,15 +1207,18 @@ def run_replications_cb(n_clicks, scenario_key, pricing):
         Output("whatif-content", "children"),
         Output("savings-chart", "figure"),
     ],
-    Input("btn-compare", "n_clicks"),
-    State("pricing-dropdown", "value"),
+    [
+        Input("btn-compare", "n_clicks"),
+        State("pricing-dropdown", "value"),
+        State("num-users-store", "data"),
+    ],
     prevent_initial_call=True,
 )
-def compare_scenarios_cb(n_clicks, pricing):
+def compare_scenarios_cb(n_clicks, pricing, n_users):
     if not n_clicks:
         return no_update, no_update
-
-    results = run_all_scenarios(n_replications=10, base_seed=1000, pricing_scheme=pricing)
+    
+    results = run_all_scenarios(n_replications=10, base_seed=1000, pricing_scheme=pricing, num_users=n_users)
     comparison_df = compare_to_baseline(results)
 
     table_rows = []

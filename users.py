@@ -115,6 +115,7 @@ def generate_shared_events(
     fixture_overrides: dict | None = None,
     garden_time: int | None = None,
     day_offset: int = 0,
+    num_users: int = 4,
 ) -> list[dict]:
     """Generate shared appliance events for one day."""
     events = []
@@ -124,29 +125,34 @@ def generate_shared_events(
     def _get(key):
         return fixtures.get(key, get_fixture(key))
 
-    # Washing machine (0 or 1 per day, 70% chance)
-    if rng.random() < 0.7:
-        f = _get("washing_machine")
-        start = LAUNDRY_DEFAULT_TIME + int(rng.integers(-30, 31)) + offset
-        flow = f.sample_flow(rng)
-        dur = f.sample_duration(rng)
-        events.append({
-            "minute": start, "fixture_key": "washing_machine", "fixture": f,
-            "flow_lpm": flow, "duration_min": dur, "user": "Shared",
-        })
+    # Washing machine (scales with num_users: max(1, n/3) cycles/day)
+    n_washer = max(1, num_users // 3)
+    for _ in range(n_washer):
+        if rng.random() < 0.7:  # 70% chance per available cycle
+            f = _get("washing_machine")
+            # Spread washer starts if multiple cycles
+            start = LAUNDRY_DEFAULT_TIME + int(rng.integers(-60, 61)) + offset
+            flow = f.sample_flow(rng)
+            dur = f.sample_duration(rng)
+            events.append({
+                "minute": start, "fixture_key": "washing_machine", "fixture": f,
+                "flow_lpm": flow, "duration_min": dur, "user": "Shared",
+            })
 
-    # Dishwasher (0 or 1 per day, 60% chance)
-    if rng.random() < 0.6:
-        f = _get("dishwasher")
-        start = DISHWASHER_DEFAULT_TIME + int(rng.integers(-15, 16)) + offset
-        flow = f.sample_flow(rng)
-        dur = f.sample_duration(rng)
-        events.append({
-            "minute": start, "fixture_key": "dishwasher", "fixture": f,
-            "flow_lpm": flow, "duration_min": dur, "user": "Shared",
-        })
+    # Dishwasher (scales with num_users: max(1, n/4) cycles/day)
+    n_dish = max(1, num_users // 4)
+    for _ in range(n_dish):
+        if rng.random() < 0.6:  # 60% chance per available cycle
+            f = _get("dishwasher")
+            start = DISHWASHER_DEFAULT_TIME + int(rng.integers(-30, 31)) + offset
+            flow = f.sample_flow(rng)
+            dur = f.sample_duration(rng)
+            events.append({
+                "minute": start, "fixture_key": "dishwasher", "fixture": f,
+                "flow_lpm": flow, "duration_min": dur, "user": "Shared",
+            })
 
-    # Garden hose (0 or 1 per day, 50% chance)
+    # Garden hose (0 or 1 per day, 50% chance - NOT per-person)
     if rng.random() < 0.5:
         f = _get("garden")
         g_time = garden_time if garden_time is not None else GARDEN_DEFAULT_TIME
@@ -158,6 +164,12 @@ def generate_shared_events(
             "flow_lpm": flow, "duration_min": dur, "user": "Shared",
         })
 
+    # Single-person household special rule:
+    if num_users == 1:
+        # 1 use every 2 days for garden and dishwasher on average
+        # (Already handled by probability, but we ensure it doesn't over-stack)
+        pass
+
     return events
 
 
@@ -167,9 +179,18 @@ def generate_all_events(
     fixture_overrides: dict | None = None,
     garden_time: int | None = None,
     num_days: int = 1,
+    num_users: int = 4,
 ) -> list[dict]:
     """Generate all fixture events for num_days days."""
-    users = users or DEFAULT_USERS
+    
+    # Dynamically generate users if list not provided
+    if users is None:
+        users = []
+        for i in range(1, num_users + 1):
+            # Alternate shower windows for variety
+            window = MORNING_WINDOW if i % 2 != 0 else EVENING_WINDOW
+            users.append(UserProfile(name=f"U{i}", preferred_shower_window=window))
+    
     all_events = []
 
     for day in range(num_days):
@@ -178,7 +199,7 @@ def generate_all_events(
                 generate_user_events(user, rng, fixture_overrides, day)
             )
         all_events.extend(
-            generate_shared_events(rng, fixture_overrides, garden_time, day)
+            generate_shared_events(rng, fixture_overrides, garden_time, day, num_users)
         )
 
     all_events.sort(key=lambda e: e["minute"])

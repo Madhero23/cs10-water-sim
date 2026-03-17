@@ -66,6 +66,7 @@ def run_all_scenarios(
     n_replications: int = 10,
     base_seed: int = 1000,
     pricing_scheme: str = "flat",
+    num_users: int = 4,
 ) -> dict:
     """Run all scenarios and return {key: DataFrame}."""
     results = {}
@@ -77,6 +78,7 @@ def run_all_scenarios(
             garden_time=sc["garden_time"],
             leak_gpm=sc["leak_gpm"],
             pricing_scheme=pricing_scheme,
+            num_users=num_users,
         )
         results[key] = states_to_dataframe(states)
     return results

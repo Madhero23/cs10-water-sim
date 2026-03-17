@@ -30,6 +30,13 @@ class BaselineProfile:
     per_fixture_baseline: dict = field(default_factory=dict)
     std_daily: float = 0.0
     n_runs: int = 0
+    num_users: int = 4
+
+
+def get_expected_baseline(num_users: int) -> float:
+    """Calculate theoretical baseline daily usage (L) as per project guide."""
+    # (per_user_daily_avg ≈ 179 L * n) + shared_fixture_usage ≈ 178.6 L
+    return round((179.0 * num_users) + 178.6, 1)
 
 
 def compute_baseline(replication_states) -> BaselineProfile:
@@ -61,6 +68,7 @@ def compute_baseline(replication_states) -> BaselineProfile:
     baseline.std_daily = round(np.std(daily_totals), 2)
     baseline.hourly_baseline = {h: round(v / n, 2) for h, v in hourly_sums.items()}
     baseline.per_fixture_baseline = {k: round(v / n, 2) for k, v in fixture_sums.items()}
+    baseline.num_users = getattr(replication_states[0], "num_users", 4)
 
     return baseline
 
@@ -128,12 +136,15 @@ def detect_leaks(
             overnight_start = None
 
     # ── CONDITION 2: Overuse anomaly ────────────────────────────────────────
-    if baseline and baseline.historical_avg_daily > 0:
-        threshold = baseline.historical_avg_daily * 1.5
+    # Use statistical baseline if available, otherwise use theoretical guide baseline
+    ref_baseline = baseline.historical_avg_daily if baseline else get_expected_baseline(state.num_users)
+    
+    if ref_baseline > 0:
+        threshold = ref_baseline * 1.5
         if state.cumulative_liters > threshold:
             deviation = (
-                (state.cumulative_liters - baseline.historical_avg_daily)
-                / baseline.historical_avg_daily * 100
+                (state.cumulative_liters - ref_baseline)
+                / ref_baseline * 100
             )
             alerts.append(LeakAlert(
                 alert_type="anomaly",

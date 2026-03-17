@@ -22,6 +22,7 @@ class SimState:
     """Holds the full state and results of a simulation run."""
     total_minutes: int = 1440
     warmup_minutes: int = 60
+    num_users: int = 4
 
     # Per-minute log (list of dicts)
     minute_log: list = field(default_factory=list)
@@ -66,6 +67,7 @@ def run_single_day(
     leak_onset: int | None = None,
     pricing_scheme: str = "flat",
     num_days: int = 1,
+    num_users: int = 4,
 ) -> SimState:
     """Run a simulation for the specified duration."""
 
@@ -76,6 +78,7 @@ def run_single_day(
         total_minutes=total_minutes,
         warmup_minutes=warmup_minutes,
         pricing_scheme=pricing_scheme,
+        num_users=num_users,
     )
 
     # Reset per-fixture tracking based on actual total
@@ -98,9 +101,9 @@ def run_single_day(
 
     # Generate all events
     events = generate_all_events(
-        rng, users=DEFAULT_USERS,
+        rng, users=None,  # Forces dynamic generation in users.py
         fixture_overrides=fix_dict, garden_time=garden_time,
-        num_days=num_days,
+        num_days=num_days, num_users=num_users,
     )
 
     # Build active-fixture map per minute
@@ -222,6 +225,7 @@ def run_replications(
     leak_gpm: float = 0.0,
     pricing_scheme: str = "flat",
     num_days: int = 1,
+    num_users: int = 4,
 ) -> list[SimState]:
     """Run n independent replications."""
     states = []
@@ -235,6 +239,7 @@ def run_replications(
             leak_gpm=leak_gpm,
             pricing_scheme=pricing_scheme,
             num_days=num_days,
+            num_users=num_users,
         )
         states.append(s)
     return states
